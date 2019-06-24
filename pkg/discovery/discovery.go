@@ -20,14 +20,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/klog"
 	"sigs.k8s.io/sig-storage-local-static-provisioner/pkg/common"
 	"sigs.k8s.io/sig-storage-local-static-provisioner/pkg/metrics"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	storagev1listers "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/tools/cache"
 	esUtil "sigs.k8s.io/sig-storage-lib-external-provisioner/util"
@@ -218,8 +221,13 @@ func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConf
 			klog.Error(err)
 			continue
 		}
+		// get host name
+		hostname, error := d.VolUtil.GetHostName()
+		if error != nil {
+			klog.Errorf("Get hostname is error : %v", error)
+		}
 		// Check if PV already exists for it
-		pvName := generatePVName(file, d.Node.Name, class)
+		pvName := generatePVName(file, d.Node.Name, class, hostname, config.MountDir)
 		pv, exists := d.Cache.GetPV(pvName)
 		if exists {
 			if pv.Spec.VolumeMode != nil && *pv.Spec.VolumeMode == v1.PersistentVolumeBlock &&
@@ -283,21 +291,32 @@ func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConf
 	}
 }
 
-func generatePVName(file, node, class string) string {
+func generatePVName(file, node, class string, hostname string, mountPath string) string {
 	h := fnv.New32a()
 	h.Write([]byte(file))
 	h.Write([]byte(node))
 	h.Write([]byte(class))
 	// This is the FNV-1a 32-bit hash
-	return fmt.Sprintf("local-pv-%x", h.Sum32())
+	return fmt.Sprintf("%s-%s-%s-%x", hostname, strings.Replace(mountPath, string(os.PathSeparator), "-", -1), file, h.Sum32())
 }
 
 func (d *Discoverer) createPV(file, class string, reclaimPolicy v1.PersistentVolumeReclaimPolicy, mountOptions []string, config common.MountConfig, capacityByte int64, volMode v1.PersistentVolumeMode, startTime time.Time) {
-	pvName := generatePVName(file, d.Node.Name, class)
+	//get host name
+	hostname, error := d.VolUtil.GetHostName()
+	if error != nil {
+		klog.Errorf("Get hostname is error : %v", error)
+	}
+
+	pvName := generatePVName(file, d.Node.Name, class, hostname, config.MountDir)
 	outsidePath := filepath.Join(config.HostDir, file)
 
 	klog.Infof("Found new volume at host path %q with capacity %d, creating Local PV %q, required volumeMode %q",
 		outsidePath, capacityByte, pvName, volMode)
+
+	dlabels := d.Labels
+	dlabels["capacityByte"] = strconv.FormatInt(capacityByte, 10)
+	dlabels["hostdir"] = strings.Replace(config.HostDir, string(os.PathSeparator), "-", -1)
+	dlabels["hostname"] = hostname
 
 	localPVConfig := &common.LocalPVConfig{
 		Name:            pvName,
@@ -307,7 +326,7 @@ func (d *Discoverer) createPV(file, class string, reclaimPolicy v1.PersistentVol
 		ReclaimPolicy:   reclaimPolicy,
 		ProvisionerName: d.Name,
 		VolumeMode:      volMode,
-		Labels:          d.Labels,
+		Labels:          dlabels,
 		MountOptions:    mountOptions,
 	}
 

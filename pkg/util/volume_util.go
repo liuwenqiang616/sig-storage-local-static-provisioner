@@ -17,14 +17,16 @@ limitations under the License.
 package util
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"k8s.io/klog"
 
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/kubernetes/pkg/volume/util/fs"
 )
 
 // VolumeUtil is an interface for local filesystem operations
@@ -46,6 +48,9 @@ type VolumeUtil interface {
 
 	// Get capacity of the block device
 	GetBlockCapacityByte(fullPath string) (int64, error)
+
+	// Get host name
+	GetHostName() (string, error)
 }
 
 var _ VolumeUtil = &volumeUtil{}
@@ -55,6 +60,12 @@ type volumeUtil struct{}
 // NewVolumeUtil returns a VolumeUtil object for performing local filesystem operations
 func NewVolumeUtil() VolumeUtil {
 	return &volumeUtil{}
+}
+
+// Get host name
+func (u *volumeUtil) GetHostName() (string, error) {
+	host, err := os.Hostname()
+	return host, err
 }
 
 // IsDir checks if the given path is a directory
@@ -115,8 +126,19 @@ func (u *volumeUtil) DeleteContents(fullPath string) error {
 // fullPath is the pathname of any file within the mounted filesystem. Capacity
 // returned here is total capacity.
 func (u *volumeUtil) GetFsCapacityByte(fullPath string) (int64, error) {
-	_, capacity, _, _, _, _, err := fs.FsInfo(fullPath)
-	return capacity, err
+	_, file := filepath.Split(fullPath)
+	arrays := strings.Split(file, "-")
+	if len(arrays) == 1 {
+		return 0, errors.New("faild split path not found '-'")
+	}
+	content := arrays[1]
+	contents := strings.Split(content, "G")
+	capas, err := strconv.ParseInt(contents[0], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	capas = capas << 30
+	return capas, nil
 }
 
 var _ VolumeUtil = &FakeVolumeUtil{}
@@ -145,6 +167,12 @@ type FakeDirEntry struct {
 	// Expected hash value of the PV name
 	Hash     uint32
 	Capacity int64
+}
+
+// Get host name
+func (u *FakeVolumeUtil) GetHostName() (string, error) {
+	host, err := os.Hostname()
+	return host, err
 }
 
 // NewFakeVolumeUtil returns a VolumeUtil object for use in unit testing
